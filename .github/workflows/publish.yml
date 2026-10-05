@@ -1,0 +1,40 @@
+name: Courier publish
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # checks the queue every 15 minutes
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate only, post nothing"
+        default: "false"
+concurrency:
+  group: courier
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish approved jobs
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+        run: python publish.py
+      - name: Save ledger and results
+        if: always()
+        run: |
+          git config user.name "courier"
+          git config user.email "courier@users.noreply.github.com"
+          git add state/ledger.json queue/results.json
+          git diff --cached --quiet || (git commit -m "courier: update ledger and results" && git pull --rebase && git push)
