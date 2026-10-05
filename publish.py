@@ -19,8 +19,16 @@ import base64, hashlib, hmac, json, mimetypes, os, secrets, sys, time, urllib.pa
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-ALLOW = {"quinn_ig", "quinn_x"}
-LIMITS = {"quinn_ig": 2200, "quinn_x": 280}
+# account -> (platform, secret prefix). Secrets are named <PREFIX>_<NAME> so each handle has its own keys.
+ACCOUNTS = {
+    "quinn_ig": ("ig", "QUINN_IG"), "quinn_x": ("x", "QUINN_X"),
+    "shaunak_ig": ("ig", "SHAUNAK_IG"), "shaunak_x": ("x", "SHAUNAK_X"),
+    "shaunak_li": ("li", "SHAUNAK_LI"),
+}
+ALLOW = set(ACCOUNTS)
+LIMITS = {"ig": 2200, "x": 280, "li": 3000}
+LI_BASE = os.environ.get("LI_API_BASE", "https://api.linkedin.com")
+LI_VERSION = os.environ.get("LI_VERSION", "202609")
 IG_BASE = os.environ.get("IG_API_BASE", "https://graph.instagram.com/v25.0")
 X_BASE = os.environ.get("X_API_BASE", "https://api.x.com")
 DRY = os.environ.get("DRY_RUN") == "1"
@@ -63,10 +71,11 @@ def job_hash(j):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def env(name):
-    v = os.environ.get(name)
+def env(prefix, name):
+    full = "%s_%s" % (prefix, name)
+    v = os.environ.get(full)
     if not v:
-        raise Fail("missing secret " + name)
+        raise Fail("missing secret " + full)
     return v
 
 
@@ -105,8 +114,8 @@ def safe_call(fn, tries=3):
 
 
 # ---------- Instagram ----------
-def post_instagram(j):
-    uid, tok = env("IG_USER_ID"), env("IG_ACCESS_TOKEN")
+def post_instagram(j, pre):
+    uid, tok = env(pre, "USER_ID"), env(pre, "ACCESS_TOKEN")
     if not j.get("mediaUrl"):
         raise Fail("Instagram needs a public mediaUrl")
     form = {"image_url": j["mediaUrl"], "caption": j["caption"], "access_token": tok}
@@ -150,9 +159,9 @@ def post_instagram(j):
 
 
 # ---------- X (OAuth 1.0a user context, no token expiry) ----------
-def oauth1_header(method, url):
-    ck, cs = env("X_API_KEY"), env("X_API_SECRET")
-    at, ats = env("X_ACCESS_TOKEN"), env("X_ACCESS_SECRET")
+def oauth1_header(method, url, pre):
+    ck, cs = env(pre, "API_KEY"), env(pre, "API_SECRET")
+    at, ats = env(pre, "ACCESS_TOKEN"), env(pre, "ACCESS_SECRET")
     p = {"oauth_consumer_key": ck, "oauth_nonce": secrets.token_hex(12), "oauth_signature_method": "HMAC-SHA1",
          "oauth_timestamp": str(int(time.time())), "oauth_token": at, "oauth_version": "1.0"}
     parts = urllib.parse.urlsplit(url)
@@ -177,42 +186,42 @@ def multipart(fields, fname, fbytes, ctype):
     return "multipart/form-data; boundary=" + b, out
 
 
-def x_upload(path):
+def x_upload(path, pre):
     full = os.path.join(ROOT, path)
     if not os.path.isfile(full):
         raise Fail("media file missing: " + path)
     data = open(full, "rb").read()
     ctype = mimetypes.guess_type(full)[0] or "image/jpeg"
     u = X_BASE + "/2/media/upload/initialize"
-    init = safe_call(lambda: http("POST", u, {"Authorization": oauth1_header("POST", u), "Content-Type": "application/json"},
+    init = safe_call(lambda: http("POST", u, {"Authorization": oauth1_header("POST", u, pre), "Content-Type": "application/json"},
                                   json.dumps({"total_bytes": len(data), "media_type": ctype, "media_category": "tweet_image"}).encode()))
     mid = (init.get("data") or {}).get("id")
     if not mid:
         raise Fail("no media id from initialize")
     u = "%s/2/media/upload/%s/append" % (X_BASE, mid)
     ct, body = multipart({"segment_index": "0"}, os.path.basename(full), data, ctype)
-    safe_call(lambda: http("POST", u, {"Authorization": oauth1_header("POST", u), "Content-Type": ct}, body))
+    safe_call(lambda: http("POST", u, {"Authorization": oauth1_header("POST", u, pre), "Content-Type": ct}, body))
     u = "%s/2/media/upload/%s/finalize" % (X_BASE, mid)
-    fin = safe_call(lambda: http("POST", u, {"Authorization": oauth1_header("POST", u)}, b""))
+    fin = safe_call(lambda: http("POST", u, {"Authorization": oauth1_header("POST", u, pre)}, b""))
     info = (fin.get("data") or {}).get("processing_info")
     tries = 0
     while info and info.get("state") in ("pending", "in_progress") and tries < 10:
         time.sleep(float(info.get("check_after_secs", 1)))
         u = "%s/2/media/upload?media_id=%s&command=STATUS" % (X_BASE, mid)
-        info = (safe_call(lambda: http("GET", u, {"Authorization": oauth1_header("GET", u)})).get("data") or {}).get("processing_info")
+        info = (safe_call(lambda: http("GET", u, {"Authorization": oauth1_header("GET", u, pre)})).get("data") or {}).get("processing_info")
         tries += 1
     if info and info.get("state") == "failed":
         raise Fail("X media processing failed")
     return mid
 
 
-def post_x(j):
+def post_x(j, pre):
     payload = {"text": j["caption"]}
     if j.get("mediaPath"):
-        payload["media"] = {"media_ids": [x_upload(j["mediaPath"])]}
+        payload["media"] = {"media_ids": [x_upload(j["mediaPath"], pre)]}
     u = X_BASE + "/2/tweets"
     try:
-        status, data = http("POST", u, {"Authorization": oauth1_header("POST", u), "Content-Type": "application/json"},
+        status, data = http("POST", u, {"Authorization": oauth1_header("POST", u, pre), "Content-Type": "application/json"},
                             json.dumps(payload).encode())
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise Unknown("POST /2/tweets outcome unknown: %s" % e)
@@ -226,8 +235,62 @@ def post_x(j):
     return {"remoteId": tid, "url": "https://x.com/i/status/" + tid}
 
 
+
+# ---------- LinkedIn (member posts, OAuth 2.0 token with w_member_social) ----------
+LI_RESERVED = "\\|{}@[]()<>#*_~"
+
+
+def li_escape(t):
+    return "".join("\\" + c if c in LI_RESERVED else c for c in t)
+
+
+def li_headers(tok, extra=None):
+    h = {"Authorization": "Bearer " + tok, "LinkedIn-Version": LI_VERSION, "X-Restli-Protocol-Version": "2.0.0"}
+    h.update(extra or {})
+    return h
+
+
+def post_linkedin(j, pre):
+    tok, pid = env(pre, "ACCESS_TOKEN"), env(pre, "PERSON_ID")
+    owner = "urn:li:person:" + pid
+    body = {"author": owner, "commentary": li_escape(j["caption"]), "visibility": "PUBLIC",
+            "distribution": {"feedDistribution": "MAIN_FEED", "targetEntities": [], "thirdPartyDistributionChannels": []},
+            "lifecycleState": "PUBLISHED", "isReshareDisabledByAuthor": False}
+    if j.get("mediaPath"):
+        full = os.path.join(ROOT, j["mediaPath"])
+        if not os.path.isfile(full):
+            raise Fail("media file missing: " + j["mediaPath"])
+        u = LI_BASE + "/rest/images?action=initializeUpload"
+        init = safe_call(lambda: http("POST", u, li_headers(tok, {"Content-Type": "application/json"}),
+                                      json.dumps({"initializeUploadRequest": {"owner": owner}}).encode()))
+        val = init.get("value") or {}
+        if not val.get("uploadUrl") or not val.get("image"):
+            raise Fail("no upload url from LinkedIn")
+        data = open(full, "rb").read()
+        safe_call(lambda: http("PUT", val["uploadUrl"], {"Authorization": "Bearer " + tok, "Content-Type": "application/octet-stream"}, data, timeout=60))
+        media = {"id": val["image"]}
+        if j.get("altText"):
+            media["altText"] = j["altText"]
+        body["content"] = {"media": media}
+    u = LI_BASE + "/rest/posts"
+    req = urllib.request.Request(u, data=json.dumps(body).encode(), method="POST", headers=li_headers(tok, {"Content-Type": "application/json"}))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            rid = r.headers.get("x-restli-id")
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:300].decode("utf-8", "replace")
+        if e.code >= 500 or e.code == 429:
+            raise Unknown("LinkedIn post http %s, check LinkedIn before retrying" % e.code)
+        raise Fail("LinkedIn post http %s: %s" % (e.code, detail))
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise Unknown("LinkedIn post outcome unknown: %s" % e)
+    if not rid:
+        raise Unknown("LinkedIn returned no post id")
+    return {"remoteId": rid, "url": "https://www.linkedin.com/feed/update/" + rid}
+
+
 # ---------- gatekeeping ----------
-def check(j, ledger):
+def check(j, ledger, disabled=()):
     """Return (ok, reason). reason 'skip' = silently not our business yet."""
     if j.get("stage") != "approved":
         return False, "skip"
@@ -235,15 +298,18 @@ def check(j, ledger):
         return False, "skip"
     if j.get("account") not in ALLOW:
         return False, "account not on allowlist: %s" % j.get("account")
+    if j.get("account") in disabled:
+        return False, "account not connected yet: %s" % j.get("account")
+    plat = ACCOUNTS[j["account"]][0]
     if not j.get("caption", "").strip():
         return False, "empty caption"
-    if len(j["caption"]) > LIMITS[j["account"]]:
-        return False, "caption too long (%d > %d)" % (len(j["caption"]), LIMITS[j["account"]])
+    if len(j["caption"]) > LIMITS[plat]:
+        return False, "caption too long (%d > %d)" % (len(j["caption"]), LIMITS[plat])
     if not j.get("approvedHash"):
         return False, "no approvedHash"
     if j["approvedHash"] != job_hash(j):
         return False, "approval does not match current content (edited after approval?)"
-    if j["account"] == "quinn_ig" and not j.get("mediaUrl"):
+    if plat == "ig" and not j.get("mediaUrl"):
         return False, "Instagram post has no media URL"
     if j.get("scheduledFor"):
         try:
@@ -256,6 +322,7 @@ def check(j, ledger):
 
 def main():
     control = jload("control.json", {"paused": True})
+    disabled = set(control.get("disabled", []))
     if control.get("paused", True):
         print("Paused. Nothing published.")
         return 0
@@ -264,7 +331,7 @@ def main():
     results = jload("queue/results.json", {})
     bad = 0
     for j in jobs:
-        ok, why = check(j, ledger)
+        ok, why = check(j, ledger, disabled)
         if not ok:
             if why != "skip":
                 results[j["id"]] = {"status": "blocked", "detail": why, "at": now().isoformat()}
@@ -276,7 +343,8 @@ def main():
             print("DRY-RUN ok", j["id"], j["account"])
             continue
         try:
-            r = post_instagram(j) if j["account"] == "quinn_ig" else post_x(j)
+            plat, pre = ACCOUNTS[j["account"]]
+            r = {"ig": post_instagram, "x": post_x, "li": post_linkedin}[plat](j, pre)
             r.update({"status": "published", "at": now().isoformat()})
             ledger[j["id"]] = r
             results[j["id"]] = r

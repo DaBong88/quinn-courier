@@ -24,12 +24,20 @@ jobs:
       - name: Publish approved jobs
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
-          IG_USER_ID: ${{ secrets.IG_USER_ID }}
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          X_API_KEY: ${{ secrets.X_API_KEY }}
-          X_API_SECRET: ${{ secrets.X_API_SECRET }}
-          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          QUINN_IG_USER_ID: ${{ secrets.QUINN_IG_USER_ID }}
+          QUINN_IG_ACCESS_TOKEN: ${{ secrets.QUINN_IG_ACCESS_TOKEN }}
+          SHAUNAK_IG_USER_ID: ${{ secrets.SHAUNAK_IG_USER_ID }}
+          SHAUNAK_IG_ACCESS_TOKEN: ${{ secrets.SHAUNAK_IG_ACCESS_TOKEN }}
+          QUINN_X_API_KEY: ${{ secrets.QUINN_X_API_KEY }}
+          QUINN_X_API_SECRET: ${{ secrets.QUINN_X_API_SECRET }}
+          QUINN_X_ACCESS_TOKEN: ${{ secrets.QUINN_X_ACCESS_TOKEN }}
+          QUINN_X_ACCESS_SECRET: ${{ secrets.QUINN_X_ACCESS_SECRET }}
+          SHAUNAK_X_API_KEY: ${{ secrets.SHAUNAK_X_API_KEY }}
+          SHAUNAK_X_API_SECRET: ${{ secrets.SHAUNAK_X_API_SECRET }}
+          SHAUNAK_X_ACCESS_TOKEN: ${{ secrets.SHAUNAK_X_ACCESS_TOKEN }}
+          SHAUNAK_X_ACCESS_SECRET: ${{ secrets.SHAUNAK_X_ACCESS_SECRET }}
+          SHAUNAK_LI_ACCESS_TOKEN: ${{ secrets.SHAUNAK_LI_ACCESS_TOKEN }}
+          SHAUNAK_LI_PERSON_ID: ${{ secrets.SHAUNAK_LI_PERSON_ID }}
         run: python publish.py
       - name: Save ledger and results
         if: always()

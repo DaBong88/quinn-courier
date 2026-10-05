@@ -3,13 +3,14 @@
 Usage: python3 bridge/prepare.py JOBS_DUMP.json MEDIA_DIR
 JOBS_DUMP.json: list of {"id":..., "data": {...}, "version": n} (as returned by ArtifactData list)
 MEDIA_DIR: files named <mediaId>.<ext> downloaded from the dashboard
-Only approved jobs for quinn_ig / quinn_x whose approvedHash still matches are queued.
+Only approved jobs for the five allowlisted accounts that are listed in COURIER_CONNECTED (comma list) whose approvedHash still matches are queued.
 Prints one line per skipped job so the bridge can log it.
 """
 import hashlib, json, os, shutil, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.environ.get("COURIER_REPO", "DaBong88/quinn-courier")
-ALLOW = {"quinn_ig", "quinn_x"}
+ALLOW = {"quinn_ig", "quinn_x", "shaunak_ig", "shaunak_x", "shaunak_li"}
+CONNECTED = set(filter(None, os.environ.get("COURIER_CONNECTED", ",".join(ALLOW)).split(",")))
 
 def h(j):
     raw = "|".join([j.get("caption") or "", j.get("mediaId") or "", j.get("account") or "", j.get("scheduledFor") or ""])
@@ -44,6 +45,8 @@ def main(dump, media_dir):
         j = dict(d["data"]); j["id"] = d["id"]
         if j.get("stage") != "approved" or j.get("account") not in ALLOW:
             continue
+        if j["account"] not in CONNECTED:
+            skipped.append((j["id"], "account not connected yet: " + j["account"])); continue
         if not j.get("approvedHash") or j["approvedHash"] != h(j):
             skipped.append((j["id"], "approval hash does not match")); continue
         job = {"id": j["id"], "account": j["account"], "stage": "approved", "caption": j["caption"],
@@ -60,7 +63,7 @@ def main(dump, media_dir):
                 skipped.append((j["id"], "image could not be converted to JPEG")); continue
             job["mediaPath"] = rel
             job["mediaUrl"] = "https://raw.githubusercontent.com/%s/main/%s" % (REPO, rel)
-        elif j["account"] == "quinn_ig":
+        elif j["account"].endswith("_ig"):
             skipped.append((j["id"], "Instagram needs an image")); continue
         out.append(job)
     json.dump(out, open(os.path.join(ROOT, "queue/jobs.json"), "w"), indent=2, sort_keys=True)
